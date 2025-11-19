@@ -1,0 +1,21 @@
+{
+  "name": "jobs-ch-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Playwright-powered jobs.ch scraper service for Railway deployment",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "postinstall": "npx playwright install --with-deps || echo \"Playwright install skipped\""
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright": "^1.48.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
+
