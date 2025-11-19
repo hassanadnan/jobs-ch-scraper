@@ -362,24 +362,92 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 						return '';
 					}
 
-					// Try DL lists (dt -> dd)
+					function normLabel(l) {
+						return (l || '')
+							.replace(/\s+/g, ' ')
+							.replace(/\s*:\s*$/, '')
+							.trim()
+							.toLowerCase();
+					}
+
+					function canonicalKey(l) {
+						return normLabel(l).replace(/[^a-z]/g, '');
+					}
+
+					// Parse all dl dt/dd pairs into a map
 					const dlValues = {};
-					document.querySelectorAll('dl').forEach((dl) => {
-						const dts = dl.querySelectorAll('dt');
-						dts.forEach((dt) => {
-							const label = (dt.innerText || dt.textContent || '').trim().replace(/:$/, '');
-							const dd = dt.nextElementSibling && dt.nextElementSibling.tagName.toLowerCase() === 'dd' ? dt.nextElementSibling : null;
+					(document.querySelectorAll('dl') || []).forEach((dl) => {
+						(dl.querySelectorAll('dt') || []).forEach((dt) => {
+							const label = normLabel(dt.innerText || dt.textContent || '');
+							if (!label) return;
+							const dd = dt.nextElementSibling && dt.nextElementSibling.tagName && dt.nextElementSibling.tagName.toLowerCase() === 'dd' ? dt.nextElementSibling : null;
 							if (!dd) return;
 							const val = (dd.innerText || dd.textContent || '').trim();
-							if (!label || !val) return;
-							dlValues[label.toLowerCase()] = val;
+							if (!val) return;
+							dlValues[canonicalKey(label)] = val;
+							dlValues[label] = val; // also keep non-canonical for fallback
 						});
 					});
 
-					function valueFor(label) {
-						const fromDl = dlValues[label.toLowerCase()];
-						if (fromDl) return fromDl;
-						return findValueByPrefix(label);
+					// Fallback: scan small blocks with "Label: value"
+					function scanPairs(labels) {
+						const out = {};
+						const roots = Array.from(document.querySelectorAll('main, article, section')) || [document.body];
+						for (const root of roots) {
+							const els = Array.from(root.querySelectorAll('p, li, div'));
+							for (const el of els) {
+								const t = (el.innerText || el.textContent || '').trim();
+								if (!t || t.length > 600 || !t.includes(':')) continue;
+								for (const label of labels) {
+									const re = new RegExp('^\\s*' + label.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&') + '\\s*:?\\s*(.+)$', 'i');
+									const m = t.match(re);
+									if (m && m[1]) {
+										out[canonicalKey(label)] = m[1].trim();
+									}
+								}
+							}
+						}
+						return out;
+					}
+
+					function getBySynonyms(map, pairs, synonyms) {
+						for (const key of Object.keys(map)) {
+							const k = key.toLowerCase();
+							for (const syn of synonyms) {
+								const can = canonicalKey(syn);
+								if (k === can || k.includes(can)) return map[key];
+							}
+						}
+						for (const key of Object.keys(pairs)) {
+							const k = key.toLowerCase();
+							for (const syn of synonyms) {
+								const can = canonicalKey(syn);
+								if (k === can || k.includes(can)) return pairs[key];
+							}
+						}
+						return '';
+					}
+
+					const synonyms = {
+						publicationDate: ['Publication date', 'Published'],
+						workload: ['Workload'],
+						contractType: ['Contract type', 'Employment type', 'Contract'],
+						language: ['Language', 'Languages'],
+						placeOfWork: ['Place of work', 'Location', 'Place'],
+						company: ['Company', 'Employer'],
+					};
+
+					const scannedPairs = scanPairs([
+						...synonyms.publicationDate,
+						...synonyms.workload,
+						...synonyms.contractType,
+						...synonyms.language,
+						...synonyms.placeOfWork,
+						...synonyms.company,
+					]);
+
+					function valueForLabelGroup(group) {
+						return getBySynonyms(dlValues, scannedPairs, group);
 					}
 
 					function extractDescription() {
@@ -413,14 +481,39 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 					}
 
 					const keyInfo = {
-						publicationDate: valueFor('Publication date'),
-						workload: valueFor('Workload'),
-						contractType: valueFor('Contract type'),
-						language: valueFor('Language'),
-						placeOfWork: valueFor('Place of work'),
+						publicationDate: valueForLabelGroup(synonyms.publicationDate),
+						workload: valueForLabelGroup(synonyms.workload),
+						contractType: valueForLabelGroup(synonyms.contractType),
+						language: valueForLabelGroup(synonyms.language),
+						placeOfWork: valueForLabelGroup(synonyms.placeOfWork),
 					};
 
+					// Title and company from detail header
+					const titleEl = document.querySelector('main h1, h1');
+					const title = titleEl ? text(titleEl) : '';
+					let company = '';
+					const companySelectors = [
+						'[data-testid="company-name"]',
+						'header a[href*="/companies/"]',
+						'main a[href*="/companies/"]',
+						'main a[href*="/company/"]',
+						'a[rel="noopener"][target="_blank"]',
+					];
+					for (const sel of companySelectors) {
+						const el = document.querySelector(sel);
+						if (el) {
+							const t = text(el);
+							if (t && t.length <= 120) {
+								company = t;
+								break;
+							}
+						}
+					}
+					if (!company) company = valueForLabelGroup(synonyms.company);
+
 					return {
+						title,
+						company,
 						description: extractDescription(),
 						keyInfo,
 					};
@@ -428,6 +521,12 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 
 				job.description = detail.description;
 				job.keyInfo = detail.keyInfo;
+				// Override/normalize with detail page authoritative data
+				if (detail.title) job.title = detail.title;
+				if (detail.company) job.company = detail.company;
+				if (detail.keyInfo?.placeOfWork) job.location = detail.keyInfo.placeOfWork;
+				if (detail.keyInfo?.workload) job.workload = detail.keyInfo.workload;
+				if (detail.keyInfo?.contractType) job.contractType = detail.keyInfo.contractType;
 
 				// polite delay
 				await detailsPage.waitForTimeout(200);
