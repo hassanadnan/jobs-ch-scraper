@@ -87,6 +87,12 @@ async function maybeAcceptCookies(page) {
 		'button:has-text("Akzeptieren")',
 		'button:has-text("Alle akzeptieren")',
 		'button:has-text("Tout accepter")',
+		'#onetrust-accept-btn-handler',
+		'button#onetrust-accept-btn-handler',
+		'#didomi-notice-agree-button',
+		'button[id="didomi-notice-agree-button"]',
+		'[data-testid="uc-accept-all-button"]',
+		'button[aria-label*="accept" i]',
 	];
 	for (const sel of consentButtons) {
 		try {
@@ -103,7 +109,7 @@ async function maybeAcceptCookies(page) {
 
 async function extractPageJobs(page) {
 	// Evaluate anchors in main content that lead to vacancy pages
-	const jobs = await page.$$eval('main a[href*="/vacanc"]', (anchors) => {
+	let jobs = await page.$$eval('main a[href*="/vacanc"]', (anchors) => {
 		function decodeEntitiesLocal(text) {
 			if (!text) return '';
 			return text
@@ -200,6 +206,37 @@ async function extractPageJobs(page) {
 		}
 		return results;
 	});
+
+	// Fallback: broader selector if nothing found (structure may differ server-side)
+	if (!jobs || jobs.length === 0) {
+		jobs = await page.$$eval('a[href*="/vacancies/detail/"]', (anchors) => {
+			function stripHtmlLocal(html) {
+				return String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+			}
+			const results = [];
+			const seen = new Set();
+			for (const a of anchors) {
+				try {
+					const href = a.getAttribute('href') || '';
+					if (!href) continue;
+					const url = href.startsWith('http') ? href : new URL(href, location.origin).href;
+					if (seen.has(url)) continue;
+					seen.add(url);
+					const text = stripHtmlLocal(a.innerHTML || '');
+					results.push({
+						title: text.slice(0, 140),
+						company: '',
+						location: '',
+						workload: '',
+						contractType: '',
+						postedText: '',
+						link: url,
+					});
+				} catch {}
+			}
+			return results;
+		});
+	}
 	return jobs;
 }
 
@@ -256,6 +293,16 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 			await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 			await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 			await maybeAcceptCookies(page);
+
+			// Give client-side rendering a moment and ensure elements exist
+			await page.waitForTimeout(800);
+			await page.waitForSelector('a[href*="/vacanc"], a[href*="/vacancies/detail/"]', { timeout: 8000 }).catch(() => {});
+
+			// Try to trigger lazy loads by scrolling
+			for (let s = 0; s < 3; s++) {
+				await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+				await page.waitForTimeout(400);
+			}
 
 			const jobs = await extractPageJobs(page);
 			const known = new Set(allJobs.map((j) => j.link));
