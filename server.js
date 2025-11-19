@@ -236,7 +236,11 @@ function buildSearchUrl(term) {
 }
 
 async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
-	const browser = await chromium.launch({ headless: true });
+	const browser = await chromium.launch({
+		headless: true,
+		// Flags for containerized environments like Railway
+		args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+	});
 	const context = await browser.newContext({
 		userAgent: DEFAULT_HEADERS.UserAgent,
 		locale: DEFAULT_HEADERS.Locale,
@@ -428,8 +432,8 @@ app.get('/scrape', async (req, res) => {
 	}
 });
 
-app.listen(PORT, () => {
-	console.log(`jobs-ch-scraper listening on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+	console.log(`jobs-ch-scraper listening on port ${PORT} (0.0.0.0)`);
 });
 
 
