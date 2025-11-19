@@ -493,17 +493,25 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 					const title = titleEl ? text(titleEl) : '';
 					let company = '';
 					const companySelectors = [
-						'[data-testid="company-name"]',
-						'header a[href*="/companies/"]',
+						'main [data-testid="company-name"]',
 						'main a[href*="/companies/"]',
 						'main a[href*="/company/"]',
-						'a[rel="noopener"][target="_blank"]',
+						'main a[rel="noopener"][target="_blank"]',
 					];
 					for (const sel of companySelectors) {
 						const el = document.querySelector(sel);
 						if (el) {
 							const t = text(el);
-							if (t && t.length <= 120) {
+							// Filter out navigation/common labels
+							if (
+								t &&
+								t.length <= 160 &&
+								!/^explore companies$/i.test(t) &&
+								!/^find a job$/i.test(t) &&
+								!/^salary estimator$/i.test(t) &&
+								!/^recruiter area$/i.test(t) &&
+								!/^login$/i.test(t)
+							) {
 								company = t;
 								break;
 							}
@@ -511,12 +519,37 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 					}
 					if (!company) company = valueForLabelGroup(synonyms.company);
 
-					return {
+					const out = {
 						title,
 						company,
 						description: extractDescription(),
 						keyInfo,
 					};
+
+					// Sanitize keyInfo values
+					const clean = (s) => (s || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+					const stripPrefix = (val, label) =>
+						clean(val).replace(new RegExp('^\\s*' + label.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&') + '\\s*:?\\s*', 'i'), '').trim();
+
+					if (out.keyInfo) {
+						if (out.keyInfo.publicationDate) {
+							out.keyInfo.publicationDate = stripPrefix(out.keyInfo.publicationDate, 'Publication date');
+						}
+						if (out.keyInfo.workload) {
+							out.keyInfo.workload = stripPrefix(out.keyInfo.workload, 'Workload');
+						}
+						if (out.keyInfo.contractType) {
+							out.keyInfo.contractType = stripPrefix(out.keyInfo.contractType, 'Contract type');
+						}
+						if (out.keyInfo.language) {
+							out.keyInfo.language = stripPrefix(out.keyInfo.language, 'Language');
+						}
+						if (out.keyInfo.placeOfWork) {
+							out.keyInfo.placeOfWork = stripPrefix(out.keyInfo.placeOfWork, 'Place of work');
+						}
+					}
+
+					return out;
 				});
 
 				job.description = detail.description;
