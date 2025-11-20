@@ -107,6 +107,32 @@ async function maybeAcceptCookies(page) {
 	}
 }
 
+async function maybeExpandDescription(page) {
+	// Attempt to expand collapsible sections like "Show more"
+	const expanders = [
+		'button:has-text("Show more")',
+		'button:has-text("Mehr anzeigen")',
+		'button:has-text("Afficher plus")',
+		'button[aria-expanded="false"]',
+		'[data-testid="expand-button"]',
+	];
+	for (const sel of expanders) {
+		try {
+			const btns = page.locator(sel);
+			const count = await btns.count();
+			for (let i = 0; i < Math.min(count, 5); i++) {
+				const b = btns.nth(i);
+				if (await b.isVisible({ timeout: 500 })) {
+					await b.click({ timeout: 500 }).catch(() => {});
+					await page.waitForTimeout(150);
+				}
+			}
+		} catch {
+			// ignore
+		}
+	}
+}
+
 async function extractPageJobs(page) {
 	// Evaluate anchors in main content that lead to vacancy pages
 	let jobs = await page.$$eval('main a[href*="/vacanc"]', (anchors) => {
@@ -334,6 +360,7 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 
 				// allow dynamic content to settle
 				await detailsPage.waitForTimeout(1200);
+				await maybeExpandDescription(detailsPage);
 
 				const detail = await detailsPage.evaluate(() => {
 					function text(node) {
@@ -451,27 +478,46 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 					}
 
 					function extractDescription() {
-						// Try to find a heading that implies description content
+						// Try to gather structured sections under recognizable headings
 						const root = document.querySelector('main') || document.querySelector('article') || document.body;
-						const headings = Array.from(root.querySelectorAll('h1, h2, h3'));
+						const headings = Array.from(root.querySelectorAll('h2, h3'));
+						const wanted = /(Introduction|About the job|Ihre Aufgaben|Aufgaben|Ihr Profil|Profil|Unser Angebot|Angebot|Responsibilities|Your tasks|Requirements|What we offer)/i;
+
+						function collectUntilNextHeading(start) {
+							const chunks = [];
+							let node = start.nextElementSibling;
+							while (node) {
+								if (/^H2|H3$/.test(node.tagName)) break;
+								// collect paragraphs and list items
+								const ps = Array.from(node.querySelectorAll('p, li'));
+								if (ps.length) {
+									ps.forEach((el) => {
+										const t = text(el);
+										if (t) chunks.push(t);
+									});
+								} else {
+									const t = text(node);
+									if (t && t.split(/\s+/).length > 5) chunks.push(t);
+								}
+								node = node.nextElementSibling;
+							}
+							return chunks.join('\n');
+						}
+
+						const sections = [];
 						for (const h of headings) {
 							const ht = text(h);
-							if (/Job description|Description|Responsibilities|Your tasks/i.test(ht)) {
-								// Prefer next sibling block
-								let target = h.nextElementSibling;
-								if (target) {
-									const t = text(target);
-									if (t.split(/\s+/).length > 30) return t;
-								}
-								// Or the closest section wrapper
-								let sec = h.closest('section') || h.parentElement;
-								if (sec) {
-									const t2 = text(sec);
-									if (t2.split(/\s+/).length > 30) return t2;
+							if (wanted.test(ht)) {
+								const body = collectUntilNextHeading(h);
+								if (body && body.length > 60) {
+                                    sections.push(ht);
+									sections.push(body);
 								}
 							}
 						}
-						// Fallback: longest paragraph block in main/article
+						if (sections.length) return sections.join('\n\n');
+
+						// Fallback: longest paragraph/list block in main/article
 						let best = '';
 						(root.querySelectorAll('p, li') || []).forEach((el) => {
 							const t = text(el);
