@@ -480,14 +480,14 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 					function extractDescription() {
 						// Try to gather structured sections under recognizable headings
 						const root = document.querySelector('main') || document.querySelector('article') || document.body;
-						const headings = Array.from(root.querySelectorAll('h2, h3'));
+						const headings = Array.from(root.querySelectorAll('h2, h3, h4'));
 						const wanted = /(Introduction|About the job|Ihre Aufgaben|Aufgaben|Ihr Profil|Profil|Unser Angebot|Angebot|Responsibilities|Your tasks|Requirements|What we offer)/i;
 
 						function collectUntilNextHeading(start) {
 							const chunks = [];
 							let node = start.nextElementSibling;
 							while (node) {
-								if (/^H2|H3$/.test(node.tagName)) break;
+								if (/^H2|H3|H4$/.test(node.tagName)) break;
 								// collect paragraphs and list items
 								const ps = Array.from(node.querySelectorAll('p, li'));
 								if (ps.length) {
