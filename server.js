@@ -12,8 +12,15 @@ const DEFAULT_MAX_PAGES = Number.parseInt(process.env.MAX_PAGES || '5', 10);
 const DEFAULT_HEADERS = {
 	UserAgent:
 		'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
-	Locale: 'en-US,en;q=0.9',
+	Locale: 'de-CH',
 };
+const ACCEPT_LANGUAGE = 'de-CH,de;q=0.9,en;q=0.8';
+
+function jitter(msMin, msMax) {
+	const min = Math.ceil(msMin);
+	const max = Math.floor(msMax);
+	return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
 function decodeEntities(text) {
 	if (!text) return '';
@@ -99,6 +106,9 @@ async function maybeAcceptCookies(page) {
 			const btn = page.locator(sel).first();
 			if (await btn.isVisible({ timeout: 1000 })) {
 				await btn.click({ timeout: 1000 });
+				// give time for overlay to close
+				await page.waitForTimeout(300);
+				await page.locator('[role="dialog"], [aria-modal="true"]').first().waitFor({ state: 'detached', timeout: 1500 }).catch(() => {});
 				break;
 			}
 		} catch {
@@ -135,7 +145,7 @@ async function maybeExpandDescription(page) {
 
 async function extractPageJobs(page) {
 	// Evaluate anchors in main content that lead to vacancy pages
-	let jobs = await page.$$eval('main a[href*="/vacanc"]', (anchors) => {
+	let jobs = await page.$$eval('main a[href*="/vacancies/detail/"], main a[href*="/vacanc"]', (anchors) => {
 		function decodeEntitiesLocal(text) {
 			if (!text) return '';
 			return text
@@ -198,14 +208,14 @@ async function extractPageJobs(page) {
 				const href = a.getAttribute('href') || '';
 				if (!href) continue;
 				const url = href.startsWith('http') ? href : new URL(href, location.origin).href;
-				if (!/\/vacanc/i.test(url)) continue;
+				if (!/\/vacancies\/detail\//i.test(url) && !/\/vacanc/i.test(url)) continue;
 				if (seen.has(url)) continue;
 				seen.add(url);
 
 				const innerHtml = a.innerHTML || '';
 				const text = stripHtmlLocal(innerHtml);
-				const hasMeta = /Place of work:|Workload:|Contract type:/i.test(text);
-				if (!hasMeta) continue;
+				// skip promotional blocks
+				if (/Is this job right for you\?/i.test(text)) continue;
 
 				// Prefer heading inside card
 				let titleFromHeading = '';
@@ -307,6 +317,8 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 	const context = await browser.newContext({
 		userAgent: DEFAULT_HEADERS.UserAgent,
 		locale: DEFAULT_HEADERS.Locale,
+		timezoneId: 'Europe/Zurich',
+		extraHTTPHeaders: { 'Accept-Language': ACCEPT_LANGUAGE },
 	});
 	const page = await context.newPage();
 	const detailsPage = await context.newPage();
@@ -566,11 +578,66 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 					}
 					if (!company) company = valueForLabelGroup(synonyms.company);
 
+					// Prefer JSON-LD when available
+					function parseJsonLd() {
+						const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+						for (const s of scripts) {
+							try {
+								const json = JSON.parse(s.textContent || 'null');
+								if (!json) continue;
+								const nodes = Array.isArray(json) ? json : (json['@graph'] || [json]);
+								for (const n of nodes) {
+									if (!n) continue;
+									const types = Array.isArray(n['@type']) ? n['@type'] : [n['@type']];
+									if (types && types.map((t) => String(t || '').toLowerCase()).includes('jobposting')) {
+										const ttl = (n.title || n.name || '').trim();
+										const org = (n.hiringOrganization && (n.hiringOrganization.name || n.hiringOrganization)) || '';
+										const dp = (n.datePosted || '').trim();
+										const et = (n.employmentType || '').trim();
+										let loc = '';
+										if (Array.isArray(n.jobLocation) && n.jobLocation.length && n.jobLocation[0].address) {
+											const a = n.jobLocation[0].address;
+											loc = [a.streetAddress, a.postalCode, a.addressLocality].filter(Boolean).join(' ').trim();
+										} else if (n.jobLocation && n.jobLocation.address) {
+											const a = n.jobLocation.address;
+											loc = [a.streetAddress, a.postalCode, a.addressLocality].filter(Boolean).join(' ').trim();
+										}
+										let descHtml = n.description || '';
+										descHtml = String(descHtml)
+											.replace(/<script[\s\S]*?<\/script>/gi, '')
+											.replace(/<style[\s\S]*?<\/style>/gi, '');
+										const tmp = document.createElement('div');
+										tmp.innerHTML = descHtml;
+										const descTxt = (tmp.textContent || tmp.innerText || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+										return {
+											title: ttl,
+											company: typeof org === 'string' ? org : '',
+											publicationDate: dp,
+											contractType: et,
+											placeOfWork: loc,
+											description: descTxt,
+											descriptionHtml: descHtml,
+										};
+									}
+								}
+							} catch {}
+						}
+						return null;
+					}
+					const jsonld = parseJsonLd();
+
 					const out = {
-						title,
-						company,
-						description: extractDescription(),
-						keyInfo,
+						title: (jsonld && jsonld.title) || title,
+						company: (jsonld && jsonld.company) || company,
+						description: (jsonld && jsonld.description) || extractDescription(),
+						descriptionHtml: (jsonld && jsonld.descriptionHtml) || '',
+						keyInfo: {
+							publicationDate: (jsonld && jsonld.publicationDate) || keyInfo.publicationDate,
+							workload: keyInfo.workload,
+							contractType: (jsonld && jsonld.contractType) || keyInfo.contractType,
+							language: keyInfo.language,
+							placeOfWork: (jsonld && jsonld.placeOfWork) || keyInfo.placeOfWork,
+						},
 					};
 
 					// Sanitize keyInfo values
@@ -600,6 +667,7 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 				});
 
 				job.description = detail.description;
+				job.descriptionHtml = detail.descriptionHtml || '';
 				job.keyInfo = detail.keyInfo;
 				// Override/normalize with detail page authoritative data
 				if (detail.title) job.title = detail.title;
@@ -607,12 +675,14 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 				if (detail.keyInfo?.placeOfWork) job.location = detail.keyInfo.placeOfWork;
 				if (detail.keyInfo?.workload) job.workload = detail.keyInfo.workload;
 				if (detail.keyInfo?.contractType) job.contractType = detail.keyInfo.contractType;
+				job.sourceDetailUrl = job.link;
 
 				// polite delay
-				await detailsPage.waitForTimeout(200);
+				await detailsPage.waitForTimeout(150 + jitter(0, 250));
 			} catch (e) {
 				// Keep listing data even if details fail
 				job.description = job.description || '';
+				job.descriptionHtml = job.descriptionHtml || '';
 				job.keyInfo = job.keyInfo || {
 					publicationDate: '',
 					workload: '',
@@ -620,7 +690,9 @@ async function scrapeJobs({ term, maxPages = DEFAULT_MAX_PAGES }) {
 					language: '',
 					placeOfWork: '',
 				};
+				await detailsPage.waitForTimeout(300 + jitter(0, 400));
 			}
+		}
 		}
 	} finally {
 		await browser.close();
@@ -655,6 +727,43 @@ app.get('/scrape', async (req, res) => {
 			error: 'Scrape failed',
 			message: err?.message || String(err),
 		});
+	}
+});
+
+// Debug a single detail URL
+app.get('/scrapeDetail', async (req, res) => {
+	const url = (req.query.url || '').toString().trim();
+	if (!url) return res.status(400).json({ error: 'Missing url' });
+	try {
+		const browser = await chromium.launch({
+			headless: true,
+			args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+		});
+		const context = await browser.newContext({
+			userAgent: DEFAULT_HEADERS.UserAgent,
+			locale: DEFAULT_HEADERS.Locale,
+			timezoneId: 'Europe/Zurich',
+			extraHTTPHeaders: { 'Accept-Language': ACCEPT_LANGUAGE },
+		});
+		const page = await context.newPage();
+		await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+		await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+		await maybeAcceptCookies(page);
+		await page.waitForTimeout(800);
+		await maybeExpandDescription(page);
+		const detail = await page.evaluate(() => {
+			function text(n) {
+				return (n?.innerText || n?.textContent || '').trim();
+			}
+			const h1 = document.querySelector('main h1, h1');
+			const title = h1 ? text(h1) : '';
+			return { title };
+		});
+		await browser.close();
+		return res.json({ url, detail });
+	} catch (e) {
+		console.error('scrapeDetail error', e?.message || String(e));
+		return res.status(500).json({ error: 'scrapeDetail failed', message: e?.message || String(e) });
 	}
 });
 
